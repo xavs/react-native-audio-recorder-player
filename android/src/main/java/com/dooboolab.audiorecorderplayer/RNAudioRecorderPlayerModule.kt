@@ -1,7 +1,9 @@
 package com.dooboolab.audiorecorderplayer
 
 import android.Manifest
+import android.app.*
 import android.content.pm.PackageManager
+import android.content.Intent
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
@@ -11,46 +13,112 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter
 import com.facebook.react.modules.core.PermissionListener
 import java.io.IOException
 import java.util.*
 import kotlin.math.log10
+import com.facebook.react.bridge.ReadableMap
+
+import com.dooboolab.audiorecorderplayer.NotificationConfig
+
+object ReactContextHolder { // here to make context available to RecordingService
+    var reactContext: ReactApplicationContext? = null
+}
 
 class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext), PermissionListener {
+    private val defaultAudioSet: HashMap<String, Any> = hashMapOf(
+        "AudioEncoderAndroid" to MediaRecorder.AudioEncoder.AAC,
+        "AudioSourceAndroid" to MediaRecorder.AudioSource.CAMCORDER,
+        "OutputFormatAndroid" to MediaRecorder.OutputFormat.MPEG_4,
+        "SampleRate" to 44100,
+        "Channels" to 2,
+        "BitRate" to 128000
+    )
+    
     private var audioFileURL = ""
     private var subsDurationMillis = 500
-    private var _meteringEnabled = false
-    private var mediaRecorder: MediaRecorder? = null
+    private var _meteringEnabled = false    
     private var mediaPlayer: MediaPlayer? = null
     private var recorderRunnable: Runnable? = null
     private var mTask: TimerTask? = null
     private var mTimer: Timer? = null
     private var pausedRecordTime = 0L
     private var totalPausedRecordTime = 0L
+    private var notificationConfig = NotificationConfig()
+    private var audioSet : HashMap<String, Any> = defaultAudioSet
     var recordHandler: Handler? = Handler(Looper.getMainLooper())
+    
+
+    init{
+        ReactContextHolder.reactContext = reactContext
+    }
+    
+    private var notificationManager: NotificationManager? = null        
+
     override fun getName(): String {
         return tag
     }
+    @ReactMethod
+    fun updateNotificationConfig(config: ReadableMap) {
+        config.getString("channelId")?.let { notificationConfig = notificationConfig.copy(channelId = it) }
+        config.getString("channelName")?.let { notificationConfig = notificationConfig.copy(channelName = it) }
+        config.getString("channelDescription")?.let { notificationConfig = notificationConfig.copy(channelDescription = it) }
+        config.getInt("notificationId")?.let { notificationConfig = notificationConfig.copy(notificationId = it) }
+        config.getString("notificationTitle")?.let { notificationConfig = notificationConfig.copy(notificationTitle = it) }
+        config.getString("notificationText")?.let { notificationConfig = notificationConfig.copy(notificationText = it) }
+        config.getInt("notificationIcon")?.let { notificationConfig = notificationConfig.copy(notificationIcon = it) }
+        config.getInt("notificationPriority")?.let { notificationConfig = notificationConfig.copy(notificationPriority = it) }
+    }
+
+    private fun startRecordingService() {
+        Log.e("RNAudioRecorderPlayerModule", "startRecordingService contex? $reactContext")
+        val intent = Intent(reactContext, AudioRecordingService::class.java).apply {
+            action = "START_RECORDING"
+            putExtra("audioFileURL", audioFileURL)            
+            putExtra("meteringEnabled", _meteringEnabled)
+            putExtra("notificationConfig", notificationConfig)
+            putExtra("audioSet", audioSet )    
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            reactContext.startForegroundService(intent)
+        } else {
+            reactContext.startService(intent)
+        }
+    }
+
+    private fun stopRecordingService() {
+        val intent = Intent(reactContext, AudioRecordingService::class.java).apply {
+            action = "STOP_RECORDING"
+        }
+        reactContext.stopService(intent)
+    }
+    
 
     @ReactMethod
     fun startRecorder(path: String, audioSet: ReadableMap?, meteringEnabled: Boolean, promise: Promise) {
+        Log.e("RNAudioRecorderPlayerModule", "start recorder")
+        if ( audioSet != null ) this.audioSet = audioSet. toHashMap()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                // On devices that run Android 10 (API level 29) or higher
-                // your app can contribute to well-defined media collections such as MediaStore.Downloads without requesting any storage-related permissions
-                // https://developer.android.com/about/versions/11/privacy/storage#permissions-target-11
-                if (Build.VERSION.SDK_INT < 29 &&
-                        (ActivityCompat.checkSelfPermission(reactContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
-                        ActivityCompat.checkSelfPermission(reactContext, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED))  {
-                    ActivityCompat.requestPermissions((currentActivity)!!, arrayOf(
-                            Manifest.permission.RECORD_AUDIO,
-                            Manifest.permission.WRITE_EXTERNAL_STORAGE), 0)
-                    promise.reject("No permission granted.", "Try again after adding permission.")
-                    return
-                } else if (ActivityCompat.checkSelfPermission(reactContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions((currentActivity)!!, arrayOf(Manifest.permission.RECORD_AUDIO), 0)
+                val permissions = if (Build.VERSION.SDK_INT < 29) {
+                    arrayOf(
+                        Manifest.permission.RECORD_AUDIO,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    )
+                } else {
+                    arrayOf(
+                        Manifest.permission.RECORD_AUDIO,                        
+                        Manifest.permission.WAKE_LOCK,
+                        Manifest.permission.FOREGROUND_SERVICE,
+                        Manifest.permission.FOREGROUND_SERVICE_MICROPHONE
+                    )
+                }
+                Log.e("RNAudioRecorderPlayerModule", "permissions: ${permissions.joinToString()}")
+                if (!hasPermissions(permissions)) {
+                    ActivityCompat.requestPermissions((currentActivity)!!, permissions, 0)
                     promise.reject("No permission granted.", "Try again after adding permission.")
                     return
                 }
@@ -59,119 +127,54 @@ class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationCont
             Log.w(tag, ne.toString())
             promise.reject("No permission granted.", "Try again after adding permission.")
             return
-        }
-
+        }        
         var outputFormat = if (audioSet != null && audioSet.hasKey("OutputFormatAndroid"))
             audioSet.getInt("OutputFormatAndroid")
         else
             MediaRecorder.OutputFormat.MPEG_4
-
-        audioFileURL = if (((path == "DEFAULT"))) "${reactContext.cacheDir}/sound.${defaultFileExtensions.get(outputFormat)}" else path
+        audioFileURL = if (path == "DEFAULT") "${reactContext.cacheDir}/sound.${defaultFileExtensions[outputFormat]}" else path
         _meteringEnabled = meteringEnabled
 
-        if (mediaRecorder != null) {
-            promise.reject("InvalidState", "startRecorder has already been called.")
-            return
-        }
-
-        var newMediaRecorder: MediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            MediaRecorder(reactContext)
-        } else {
-            MediaRecorder()
-        }
-
         try {
-            if (audioSet == null) {
-                newMediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-                newMediaRecorder.setOutputFormat(outputFormat)
-                newMediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            } else {
-                newMediaRecorder.setAudioSource(if (audioSet.hasKey("AudioSourceAndroid")) audioSet.getInt("AudioSourceAndroid") else MediaRecorder.AudioSource.MIC)
-                newMediaRecorder.setOutputFormat(outputFormat)
-                newMediaRecorder.setAudioEncoder(if (audioSet.hasKey("AudioEncoderAndroid")) audioSet.getInt("AudioEncoderAndroid") else MediaRecorder.AudioEncoder.AAC)
-
-                if (audioSet.hasKey("AudioSamplingRateAndroid")) {
-                    newMediaRecorder.setAudioSamplingRate(audioSet.getInt("AudioSamplingRateAndroid"))
-                }
-
-                if (audioSet.hasKey("AudioEncodingBitRateAndroid")) {
-                    newMediaRecorder.setAudioEncodingBitRate(audioSet.getInt("AudioEncodingBitRateAndroid"))
-                }
-
-                if (audioSet.hasKey("AudioChannelsAndroid")) {
-                    newMediaRecorder.setAudioChannels(audioSet.getInt("AudioChannelsAndroid"))
-                }
-            }
-            newMediaRecorder.setOutputFile(audioFileURL)
-
-            newMediaRecorder.prepare()
-            totalPausedRecordTime = 0L
-            newMediaRecorder.start()
-
-            mediaRecorder = newMediaRecorder
-
-            val systemTime = SystemClock.elapsedRealtime()
-            recorderRunnable = object : Runnable {
-                override fun run() {
-                    val time = SystemClock.elapsedRealtime() - systemTime - totalPausedRecordTime
-                    val obj = Arguments.createMap()
-                    obj.putDouble("currentPosition", time.toDouble())
-                    if (_meteringEnabled) {
-                        var maxAmplitude = 0
-                        if (mediaRecorder != null) {
-                            maxAmplitude = mediaRecorder!!.maxAmplitude
-                        }
-                        var dB = -160.0
-                        val maxAudioSize = 32767.0
-                        if (maxAmplitude > 0) {
-                            dB = 20 * log10(maxAmplitude / maxAudioSize)
-                        }
-                        obj.putInt("currentMetering", dB.toInt())
-                    }
-                    sendEvent(reactContext, "rn-recordback", obj)
-                    recordHandler!!.postDelayed(this, subsDurationMillis.toLong())
-                }
-            }
-            (recorderRunnable as Runnable).run()
+            startRecordingService()            
             promise.resolve("file:///$audioFileURL")
         } catch (e: Exception) {
-            newMediaRecorder.release()
-            mediaRecorder = null
-
             Log.e(tag, "Exception: ", e)
-            promise.reject("startRecord", e.message)
+            stopRecordingService()
+            promise.reject("startRecorder", e.message)
         }
     }
 
-    @ReactMethod
-    fun resumeRecorder(promise: Promise) {
-        if (mediaRecorder == null) {
-            promise.reject("resumeRecorder", "Recorder is null.")
-            return
-        }
 
+    private fun hasPermissions(permissions: Array<String>): Boolean {
+        return permissions.all {
+            ActivityCompat.checkSelfPermission(reactContext, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+
+    @ReactMethod
+    fun resumeRecorder(promise: Promise) {      
         try {
-            mediaRecorder!!.resume()
-            totalPausedRecordTime += SystemClock.elapsedRealtime() - pausedRecordTime;
-            recorderRunnable?.let { recordHandler!!.postDelayed(it, subsDurationMillis.toLong()) }
+            val intent = Intent(reactContext, AudioRecordingService::class.java).apply {
+                action = "RESUME_RECORDING"
+            }
+            reactContext.startService(intent)
             promise.resolve("Recorder resumed.")
         } catch (e: Exception) {
-            Log.e(tag, "Recorder resume: " + e.message)
+            Log.e(tag, "resumeRecorder exception: " + e.message)
             promise.reject("resumeRecorder", e.message)
         }
+        
     }
 
     @ReactMethod
-    fun pauseRecorder(promise: Promise) {
-        if (mediaRecorder == null) {
-            promise.reject("pauseRecorder", "Recorder is null.")
-            return
-        }
-
+    fun pauseRecorder(promise: Promise) {        
         try {
-            mediaRecorder!!.pause()
-            pausedRecordTime = SystemClock.elapsedRealtime();
-            recorderRunnable?.let { recordHandler!!.removeCallbacks(it) };
+            val intent = Intent(reactContext, AudioRecordingService::class.java).apply {
+                action = "PAUSE_RECORDING"
+            }
+            reactContext.startService(intent)
             promise.resolve("Recorder paused.")
         } catch (e: Exception) {
             Log.e(tag, "pauseRecorder exception: " + e.message)
@@ -181,23 +184,21 @@ class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationCont
 
     @ReactMethod
     fun stopRecorder(promise: Promise) {
-        if (recordHandler != null) {
-            recorderRunnable?.let { recordHandler!!.removeCallbacks(it) }
-        }
-
-        if (mediaRecorder == null) {
-            promise.reject("stopRecord", "recorder is null.")
-            return
-        }
-
         try {
-            mediaRecorder!!.stop()
-            mediaRecorder!!.release()
-            mediaRecorder = null
+            val intent = Intent(reactContext, AudioRecordingService::class.java).apply {
+                action = "STOP_RECORDING"
+            }
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                reactContext.startForegroundService(intent)
+            } else {
+                reactContext.startService(intent)
+            }
+            
             promise.resolve("file:///$audioFileURL")
-        } catch (stopException: RuntimeException) {
-            stopException.message?.let { Log.d(tag,"" + it) }
-            promise.reject("stopRecord", stopException.message)
+        } catch (e: Exception) {
+            Log.e(tag, "stopRecorder exception: ${e.message}")
+            promise.reject("stopRecorder", e.message)
         }
     }
 

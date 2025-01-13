@@ -4,5 +4,12 @@
     <!-- dooboolab -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application>
+    <service android:name="com.dooboolab.audiorecorderplayer.AudioRecordingService" android:foregroundServiceType="microphone" />
+    </application>
+
 </manifest>
   
