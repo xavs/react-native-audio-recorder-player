@@ -35,7 +35,7 @@ class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationCont
         "OutputFormatAndroid" to MediaRecorder.OutputFormat.MPEG_4,
         "SampleRate" to 44100,
         "Channels" to 2,
-        "BitRate" to 128000
+        "BitRate" to 256000
     )
     
     private var audioFileURL = ""
@@ -108,9 +108,17 @@ class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationCont
                         Manifest.permission.RECORD_AUDIO,
                         Manifest.permission.WRITE_EXTERNAL_STORAGE
                     )
-                } else {
+                } else if (Build.VERSION.SDK_INT < 34) {
+                    // For SDK 29-33 (Android 10-13)
                     arrayOf(
-                        Manifest.permission.RECORD_AUDIO,                        
+                        Manifest.permission.RECORD_AUDIO,
+                        Manifest.permission.WAKE_LOCK,
+                        Manifest.permission.FOREGROUND_SERVICE
+                    )
+                } else {
+                    // For SDK 34 and above (Android 14+)
+                    arrayOf(
+                        Manifest.permission.RECORD_AUDIO,
                         Manifest.permission.WAKE_LOCK,
                         Manifest.permission.FOREGROUND_SERVICE,
                         Manifest.permission.FOREGROUND_SERVICE_MICROPHONE
@@ -118,10 +126,16 @@ class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationCont
                 }
                 Log.e("RNAudioRecorderPlayerModule", "permissions: ${permissions.joinToString()}")
                 if (!hasPermissions(permissions)) {
-                    ActivityCompat.requestPermissions((currentActivity)!!, permissions, 0)
-                    promise.reject("No permission granted.", "Try again after adding permission.")
+                    // Store the promise to be resolved later                    
+                    Log.i("RNAudioRecorderPlayerModule", "Request permissions.")
+                    // Request permissions and handle the result in onRequestPermissionsResult
+                    ActivityCompat.requestPermissions(
+                        currentActivity ?: throw NullPointerException("Activity is null"),
+                        permissions,
+                        PERMISSION_REQUEST_CODE
+                    )
                     return
-                }
+                }                
             }
         } catch (ne: NullPointerException) {
             Log.w(tag, ne.toString())
@@ -416,6 +430,7 @@ class RNAudioRecorderPlayerModule(private val reactContext: ReactApplicationCont
 
     companion object {
         private var tag = "RNAudioRecorderPlayer"
+        private val PERMISSION_REQUEST_CODE = 200
         private var defaultFileName = "sound.mp4"
         private var defaultFileExtensions = listOf(
             "mp4", // DEFAULT = 0

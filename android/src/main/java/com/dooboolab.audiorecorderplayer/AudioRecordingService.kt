@@ -90,6 +90,8 @@ class AudioRecordingService : Service() {
                 setAudioSource( audioSet?.getString("AudioSourceAndroid")?.toInt() ?: MediaRecorder.AudioSource.CAMCORDER)
                 setOutputFormat( audioSet?.getInt("OutputFormatAndroid") ?: MediaRecorder.OutputFormat.MPEG_4)
                 setAudioEncoder( audioSet?.getInt("AudioEncoderAndroid") ?: MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(audioSet?.getInt("AudioEncodingBitRateAndroid") ?: 256000)
+                
                 setOutputFile(audioFileURL)
                 prepare()
                 start()
